@@ -29,13 +29,62 @@ from azure.datalake.store.multithread import ADLDownloader, ADLUploader
 from azure.datalake.store.utils import write_stdout
 
 
+import configparser
+
+config = configparser.ConfigParser()
+config.read('config.properties')
+
+tenant = config.get('Authentication', 'tenant')
+auth_resource = config.get('Authentication', 'auth_resource')
+client_id = config.get('Authentication', 'client_id')
+client_secret = config.get('Authentication', 'client_secret')
+
+adlsAccountName = config.get('Filesystem', 'adlsAccountName')
+
+
+## Use this for Azure AD authentication
+from msrestazure.azure_active_directory import AADTokenCredentials
+
+## Required for Data Lake Storage Gen1 account management
+from azure.mgmt.datalake.store import DataLakeStoreAccountManagementClient
+from azure.mgmt.datalake.store.models import DataLakeStoreAccount
+
+## Required for Data Lake Storage Gen1 filesystem management
+from azure.datalake.store import core, lib, multithread
+
+# Common Azure imports
+import adal
+from azure.mgmt.resource.resources import ResourceManagementClient
+from azure.mgmt.resource.resources.models import ResourceGroup
+
+## Use these as needed for your application
+import logging, getpass, pprint, uuid, time
+
+adlCreds = lib.auth(tenant_id = tenant,
+                client_secret = client_secret,
+                client_id = client_id,
+                resource = auth_resource)
+
+# Create filesystem client
+
+## Create a filesystem client object
+adlsFileSystemClient = core.AzureDLFileSystem(adlCreds, store_name=adlsAccountName)
+
+## synonym for adlsFileSystemClient
+afsc = adlsFileSystemClient
+
+
 class AzureDataLakeFSCommand(cmd.Cmd, object):
     """Accept commands via an interactive prompt or the command line."""
 
-    prompt = 'azure> '
+    prompt = 'Azure[%s]: ' % adlsAccountName
     undoc_header = None
     _hidden_methods = ('do_EOF',)
 
+    # If this method is not overridden, it repeats the last nonempty command entered.
+    def emptyline(self):
+        return ""
+    
     def __init__(self, fs):
         super(AzureDataLakeFSCommand, self).__init__()
         self._fs = fs
@@ -45,47 +94,57 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
 
     def do_close(self, line):
         return True
-
+        
     def help_close(self):
-        print("close\n")
+        print("Usage: close")
+        print("Exit the application")
+
+    def do_exit(self, line):
+        return True
+        
+    def help_exit(self):
+        print("Usage: exit")
         print("Exit the application")
 
     def do_cat(self, line):
         parser = argparse.ArgumentParser(prog="cat", add_help=False)
         parser.add_argument('files', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for f in args.files:
             write_stdout(self._fs.cat(f))
 
     def help_cat(self):
-        print("cat file ...\n")
+        print("Usage: cat file ...")
         print("Display contents of files")
 
     def do_chgrp(self, line):
         parser = argparse.ArgumentParser(prog="chgrp", add_help=False)
         parser.add_argument('group', type=str)
         parser.add_argument('files', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for f in args.files:
             self._fs.chown(f, group=args.group)
 
     def help_chgrp(self):
-        print("chgrp group file ...\n")
+        print("Usage: chgrp group file ...")
         print("Change file group")
 
     def do_chmod(self, line):
         parser = argparse.ArgumentParser(prog="chmod", add_help=False)
         parser.add_argument('mode', type=str)
         parser.add_argument('files', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for f in args.files:
             self._fs.chmod(f, args.mode)
 
     def help_chmod(self):
-        print("chmod mode file ...\n")
+        print("Usage: chmod mode file ...")
         print("Change file permissions")
 
     def _parse_ownership(self, ownership):
@@ -102,7 +161,8 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
         parser = argparse.ArgumentParser(prog="chown", add_help=False)
         parser.add_argument('ownership', type=str)
         parser.add_argument('files', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         owner, group = self._parse_ownership(args.ownership)
 
@@ -110,8 +170,8 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
             self._fs.chown(f, owner=owner, group=group)
 
     def help_chown(self):
-        print("chown owner[:group] file ...")
-        print("chown :group file ...\n")
+        print("Usage: chown owner[:group] file ...")
+        print("Usage: chown :group file ...")
         print("Change file owner and group")
 
     def _display_dict(self, d):
@@ -122,12 +182,13 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
     def do_df(self, line):
         parser = argparse.ArgumentParser(prog="df", add_help=False)
         parser.add_argument('path', type=str, nargs='?', default='.')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         self._display_dict(self._fs.df(args.path))
 
     def help_df(self):
-        print("df [path]\n")
+        print("Usage: df [path]")
         print("Display Azure account statistics of a path")
 
     def _truncate(self, num, fmt):
@@ -152,7 +213,8 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
         parser.add_argument('-c', '--total', action='store_true')
         parser.add_argument('-h', '--human-readable', action='store_true')
         parser.add_argument('-r', '--recursive', action='store_true')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         total = 0
         for f in args.files:
@@ -164,18 +226,19 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
             self._display_path_with_size("total", total, args.human_readable)
 
     def help_du(self):
-        print("du [-c | --total] [-r | --recursive] [-h | --human-readable] [file ...]\n")
+        print("Usage: du [-c | --total] [-r | --recursive] [-h | --human-readable] [file ...]")
         print("Display disk usage statistics")
 
     def do_exists(self, line):
         parser = argparse.ArgumentParser(prog="exists", add_help=False)
         parser.add_argument('file', type=str)
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         print(self._fs.exists(args.file, invalidate_cache=False))
 
     def help_exists(self):
-        print("exists file\n")
+        print("Usage: exists file")
         print("Check if file/directory exists")
 
     def do_get(self, line):
@@ -185,19 +248,20 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
         parser.add_argument('-b', '--chunksize', type=int, default=2**28)
         parser.add_argument('-c', '--threads', type=int, default=None)
         parser.add_argument('-f', '--force', action='store_true')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         ADLDownloader(self._fs, args.remote_path, args.local_path,
                       nthreads=args.threads, chunksize=args.chunksize,
                       overwrite=args.force)
 
     def help_get(self):
-        print("get [option]... remote-path [local-path]\n")
-        print("Retrieve the remote path and store it locally\n")
+        print("Usage: get [option]... remote-path [local-path]")
+        print("Retrieve the remote path and store it locally")
         print("Options:")
         print("    -b <int>")
         print("    --chunksize <int>")
-        print("        Set size of chunk to retrieve atomically, in bytes.\n")
+        print("        Set size of chunk to retrieve atomically, in bytes.")
         print("    -c <int>")
         print("    --threads <int>")
         print("        Set number of multiple requests to perform at a time.")
@@ -209,25 +273,27 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
         parser = argparse.ArgumentParser(prog="head", add_help=False)
         parser.add_argument('files', type=str, nargs='+')
         parser.add_argument('-c', '--bytes', type=int, default=1024)
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for f in args.files:
             write_stdout(self._fs.head(f, size=args.bytes))
 
     def help_head(self):
-        print("head [-c bytes | --bytes bytes] file ...\n")
+        print("Usage: head [-c bytes | --bytes bytes] file ...")
         print("Display first bytes of a file")
 
     def do_info(self, line):
         parser = argparse.ArgumentParser(prog="info", add_help=False)
         parser.add_argument('files', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for f in args.files:
             self._display_dict(self._fs.info(f, invalidate_cache=False))
 
     def help_info(self):
-        print("info file ...\n")
+        print("Usage: info file ...")
         print("Display file information")
 
     def _display_item(self, item, human_readable):
@@ -271,7 +337,8 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
         parser.add_argument('dirs', type=str, nargs='*', default=[''])
         parser.add_argument('-h', '--human-readable', action='store_true')
         parser.add_argument('-l', '--detail', action='store_true')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for d in args.dirs:
             for item in self._fs.ls(d, detail=args.detail, invalidate_cache=False):
@@ -281,30 +348,32 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
                     print(os.path.basename(item))
 
     def help_ls(self):
-        print("ls [-h | --human-readable] [-l | --detail] [file ...]\n")
+        print("Usage: ls [-h | --human-readable] [-l | --detail] [file ...]")
         print("List directory contents")
 
     def do_mkdir(self, line):
         parser = argparse.ArgumentParser(prog="mkdir", add_help=False)
         parser.add_argument('dirs', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for d in args.dirs:
             self._fs.mkdir(d)
 
     def help_mkdir(self):
-        print("mkdir directory ...\n")
+        print("Usage: mkdir directory ...")
         print("Create directories")
 
     def do_mv(self, line):
         parser = argparse.ArgumentParser(prog="mv", add_help=False)
         parser.add_argument('files', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         self._fs.mv(args.files[0], args.files[1])
 
     def help_mv(self):
-        print("mv from-path to-path\n")
+        print("Usage: mv from-path to-path")
         print("Rename from-path to to-path")
 
     def do_put(self, line):
@@ -314,19 +383,20 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
         parser.add_argument('-b', '--chunksize', type=int, default=2**28)
         parser.add_argument('-c', '--threads', type=int, default=None)
         parser.add_argument('-f', '--force', action='store_true')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         ADLUploader(self._fs, args.remote_path, args.local_path,
                     nthreads=args.threads, chunksize=args.chunksize,
                     overwrite=args.force)
 
     def help_put(self):
-        print("put [option]... local-path [remote-path]\n")
-        print("Store a local file on the remote machine\n")
+        print("Usage: put [option]... local-path [remote-path]")
+        print("Store a local file on the remote machine")
         print("Options:")
         print("    -b <int>")
         print("    --chunksize <int>")
-        print("        Set size of chunk to store atomically, in bytes.\n")
+        print("        Set size of chunk to store atomically, in bytes.")
         print("    -c <int>")
         print("    --threads <int>")
         print("        Set number of multiple requests to perform at a time.")
@@ -338,57 +408,61 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
         return True
 
     def help_quit(self):
-        print("quit\n")
+        print("Usage: quit")
         print("Exit the application")
 
     def do_rm(self, line):
         parser = argparse.ArgumentParser(prog="rm", add_help=False)
         parser.add_argument('files', type=str, nargs='+')
         parser.add_argument('-r', '--recursive', action='store_true')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for f in args.files:
             self._fs.rm(f, recursive=args.recursive)
 
     def help_rm(self):
-        print("rm [-r | --recursive] file ...\n")
+        print("Usage: rm [-r | --recursive] file ...")
         print("Remove directory entries")
 
     def do_rmdir(self, line):
         parser = argparse.ArgumentParser(prog="rmdir", add_help=False)
         parser.add_argument('dirs', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for d in args.dirs:
             self._fs.rmdir(d)
 
     def help_rmdir(self):
-        print("rmdir directory ...\n")
+        print("Usage: rmdir directory ...")
         print("Remove directories")
 
     def do_tail(self, line):
         parser = argparse.ArgumentParser(prog="tail", add_help=False)
         parser.add_argument('files', type=str, nargs='+')
         parser.add_argument('-c', '--bytes', type=int, default=1024)
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for f in args.files:
             write_stdout(self._fs.tail(f, size=args.bytes))
 
     def help_tail(self):
-        print("tail [-c bytes | --bytes bytes] file ...\n")
+        print("Usage: tail [-c bytes | --bytes bytes] file ...")
         print("Display last bytes of a file")
 
     def do_touch(self, line):
         parser = argparse.ArgumentParser(prog="touch", add_help=False)
         parser.add_argument('files', type=str, nargs='+')
-        args = parser.parse_args(line.split())
+        try: args = parser.parse_args(line.split())
+        except: pass
 
         for f in args.files:
             self._fs.touch(f)
 
     def help_touch(self):
-        print("touch file ...\n")
+        print("Usage: touch file ...")
         print("Change file access and modification times")
 
     def do_EOF(self, line):
@@ -414,7 +488,7 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
             print("No such upload")
 
     def help_resume_upload(self):
-        print("resume_upload name")
+        print("Usage: resume_upload name")
         print()
         print("Restart the upload designated by <name> and run until done.")
 
@@ -438,43 +512,52 @@ class AzureDataLakeFSCommand(cmd.Cmd, object):
             print("No such download")
 
     def help_resume_download(self):
-        print("resume_download name")
+        print("Usage: resume_download name")
         print()
         print("Restart the download designated by <name> and run until done.")
 
+    def do_find(self, line):
+        parser = argparse.ArgumentParser(prog="find", add_help=False)
+        parser.add_argument('path', type=str, nargs='?', default='.')
+        parser.add_argument('partial_filename', type=str, nargs='?')
+        try: args = parser.parse_args(line.split())
+        except: pass
 
-def setup_logging(default_level='WARNING'):
-    """ Setup logging configuration
+        for filename in self._fs.glob(args.path):
+            if not args.partial_filename:
+                print(filename)
+            else:
+                if args.partial_filename in filename:
+                    print(filename)
 
-    The logging configuration can be overridden with one environment variable:
-
-    ADLFS_LOG_LEVEL (defines logging level)
-    """
-    import logging
-    import os
-    import sys
-
-    log_level = os.environ.get('ADLFS_LOG_LEVEL', default_level)
-
-    levels = dict(
-        CRITICAL=logging.CRITICAL,
-        ERROR=logging.ERROR,
-        WARNING=logging.WARNING,
-        INFO=logging.INFO,
-        DEBUG=logging.DEBUG)
-
-    if log_level in levels:
-        log_level = levels[log_level]
-    else:
-        sys.exit("invalid ADLFS_LOG_LEVEL '{0}'".format(log_level))
-
-    logging.basicConfig(level=log_level)
+    def help_find(self):
+        print("Usage: find path [partial_filename]")
+        print("Find partial filename in a path (recursively)")
 
 
 if __name__ == '__main__':
-    setup_logging()
-    fs = AzureDLFileSystem()
+    #fs = AzureDLFileSystem()
+    fs = afsc
+    
+    print("""Welcome to the Azure Datalake Store CLI!
+
+Type '?' or 'help' for listing all the available commands and 'help command' in order to print the command usage.
+
+For exit, type 'exit' or 'close'.
+""")
+
     if len(sys.argv) > 1:
         AzureDataLakeFSCommand(fs).onecmd(' '.join(sys.argv[1:]))
     else:
-        AzureDataLakeFSCommand(fs).cmdloop()
+        while True:
+            try:
+                AzureDataLakeFSCommand(fs).cmdloop()
+            except UnboundLocalError:
+                pass
+            except AttributeError:
+                print(" >> AttributeError: %s" % sys.exc_info()[1])
+                pass
+            except Exception as ex:
+                print(" >> Exception: '%s: %s'" % (type(ex).__name__, ex))
+                pass
+
